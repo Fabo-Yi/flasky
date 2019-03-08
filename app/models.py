@@ -16,13 +16,13 @@ from . import db, login_manager
 class TimestampMixin(object):
     # created_at = Column(DateTime, default=lambda: timeutils.utcnow()+timedelta(hours=8))
     # updated_at = Column(DateTime, onupdate=lambda: timeutils.utcnow()+timedelta(hours=8))
-    created_at = db.Column(DateTime, default=lambda: datetime.now())
-    updated_at = db.Column(DateTime, onupdate=lambda: datetime.now())
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now())
+    updated_at = db.Column(db.DateTime, onupdate=lambda: datetime.now())
 
 
 class SoftDeleteMixin(object):
-    deleted_at = db.Column(DateTime)
-    deleted = db.Column(Integer, default=0)
+    deleted_at = db.Column(db.DateTime)
+    deleted = db.Column(db.Integer, default=0)
 
     # def soft_delete(self, session):
     #     """Mark this object as deleted."""
