@@ -1,13 +1,34 @@
-from datetime import datetime
+# coding=utf-8
 import hashlib
-from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime
+
+import bleach
+from flask import current_app, url_for
+from flask_login import UserMixin, AnonymousUserMixin
 from itsdangerous import TimedJSONWebSignatureSerializer as Serializer
 from markdown import markdown
-import bleach
-from flask import current_app, request, url_for
-from flask_login import UserMixin, AnonymousUserMixin
+from werkzeug.security import generate_password_hash, check_password_hash
+
 from app.exceptions import ValidationError
 from . import db, login_manager
+
+
+class TimestampMixin(object):
+    # created_at = Column(DateTime, default=lambda: timeutils.utcnow()+timedelta(hours=8))
+    # updated_at = Column(DateTime, onupdate=lambda: timeutils.utcnow()+timedelta(hours=8))
+    created_at = db.Column(DateTime, default=lambda: datetime.now())
+    updated_at = db.Column(DateTime, onupdate=lambda: datetime.now())
+
+
+class SoftDeleteMixin(object):
+    deleted_at = db.Column(DateTime)
+    deleted = db.Column(Integer, default=0)
+
+    # def soft_delete(self, session):
+    #     """Mark this object as deleted."""
+    #     self.deleted = self.id
+    #     self.deleted_at = datetime.now()
+    #     self.save(session=session)
 
 
 class Permission:
@@ -237,7 +258,7 @@ class User(UserMixin, db.Model):
 
     @property
     def followed_posts(self):
-        return Post.query.join(Follow, Follow.followed_id == Post.author_id)\
+        return Post.query.join(Follow, Follow.followed_id == Post.author_id) \
             .filter(Follow.follower_id == self.id)
 
     def to_json(self):
@@ -277,6 +298,7 @@ class AnonymousUser(AnonymousUserMixin):
 
     def is_administrator(self):
         return False
+
 
 login_manager.anonymous_user = AnonymousUser
 
@@ -365,3 +387,164 @@ class Comment(db.Model):
 
 
 db.event.listen(Comment.body, 'set', Comment.on_changed_body)
+
+
+class AtomicTaskParam(db.Model, TimestampMixin, SoftDeleteMixin):
+    """Represents ."""
+    __tablename__ = 'atomic_task_params'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    key = db.Column(db.String(255))
+    value = db.Column(db.String(255))
+    atomic_task_id = db.Column(db.Integer, db.ForeignKey('atomic_tasks.id'))
+
+    def __repr__(self):
+        return '{"id": %s, "key": %s, "value": %s}' % (self.id, self.key, self.value)
+
+
+class AtomicTask(db.Model, TimestampMixin, SoftDeleteMixin):
+    """Represents ."""
+    __tablename__ = 'atomic_tasks'
+    # __table_args__ = (schema.UniqueConstraint('name'),)
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    name = db.Column(db.String(255), unique=True, nullable=False)
+    task_type = db.Column(db.Integer, db.ForeignKey('atomic_task_types.id'))
+    icon = db.Column(db.String(255))
+    type = db.Column(db.Enum('shell', 'playbook', 'python', name='cmd_types'),
+                     nullable=False, server_default='shell')
+    content = db.Column(db.Text)
+    description = db.Column(db.String(255))
+
+    plan_start = db.Column(db.BigInteger)
+    plan_end = db.Column(db.BigInteger)
+    key_task_flag = db.Column(db.Boolean, default=False)
+
+    operator = db.Column(db.BigInteger)
+    audit_person = db.Column(db.BigInteger)
+
+    param = db.relationship(AtomicTaskParam, backref=db.backref('atomic_tasks'))
+
+    def __repr__(self):
+        return '{"id": %s, "name": %s, "task_type": %s, "icon": %s, "type": %s, "content": %s,' \
+               ' "description": %s}' % (self.id, self.name, self.task_type,
+                                        self.icon, self.type, self.content, self.description)
+
+
+class AtomicTaskType(db.Model, TimestampMixin, SoftDeleteMixin):
+    """Represents ."""
+    __tablename__ = 'atomic_task_types'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    name = db.Column(db.String(255))
+
+    tasks = db.relationship(AtomicTask, backref="atomic_task_types")
+
+    def __repr__(self):
+        return '{"id": %s, "name": %s}' % (self.id, self.name)
+
+
+class TaskOrchestration(db.Model, TimestampMixin, SoftDeleteMixin):
+    """Represents ."""
+    __tablename__ = 'task_orchestrations'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    name = db.Column(db.String(255))
+    description = db.Column(db.String(255))
+    # 对接的第三方系统名称，默认为自有: "internal"
+    origin = db.Column(db.String(255), default="internal")
+    orchestration_exe_id = db.Column(db.Integer)
+    orchestration_exe_status = db.Column(db.String(255))
+
+    # 表征任务编排的数据结构
+    specification = db.Column(db.Text)
+
+    author_id = db.Column(db.Integer)
+
+    activity = db.relationship('DeliveryActivity', uselist=False,
+                               backref=db.backref('task_orchestration', lazy='subquery'),
+                               lazy='subquery')
+
+
+class TaskOrchestrationExecution(db.Model, TimestampMixin, SoftDeleteMixin):
+    """Represents ."""
+    __tablename__ = 'task_orchestration_executions'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    task_orchestration_id = db.Column(db.Integer, db.ForeignKey('task_orchestrations.id'))
+    status = db.Column(db.Enum('PENDING', 'RUNNING', 'SUCCESS', 'FAILURE',
+                               'REVERTING', 'REVERTED', 'SUSPEND', name='orchestration_status'),
+                       nullable=False, server_default='PENDING')
+    trace = db.Column(db.Text)
+    executor_id = db.Column(db.BigInteger)
+
+
+class OrchestrationVertexAtomicTaskMapping(
+    db.Model, TimestampMixin, SoftDeleteMixin):
+    """Represent mapping between orchestration and atomic tasks"""
+    __tablename__ = 'orchestration_vertex_atomic_task_mapping'
+
+    id = db.Column(db.Integer, primary_key=True, nullable=False)
+    vertex_id = db.Column(db.String(255))
+    task_orchestration_id = db.Column(db.Integer, db.ForeignKey('task_orchestrations.id'),
+                                      nullable=False)
+    atomic_task_id = db.Column(db.Integer, db.ForeignKey('atomic_tasks.id'),
+                               nullable=False)
+
+
+class AtomicTaskExecution(db.Model, TimestampMixin, SoftDeleteMixin):
+    """Represents ."""
+    __tablename__ = 'atomic_task_executions'
+    # __table_args__ = (schema.UniqueConstraint('task_id', 'host_id'),)
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    status = db.Column(db.Enum('SUCCESS', 'FAILURE', 'RUNNING', 'PENDING', 'REVERTING',
+                               'REVERTED', name='atom_status'),
+                       nullable=False, server_default='PENDING')
+
+    atomic_task_id = db.Column(db.Integer, db.ForeignKey('atomic_tasks.id'))
+    vertex_id = db.Column(db.String(255))
+    group_code = db.Column(db.String(128))
+
+    task_orchestration_exe_id = db.Column(db.Integer,
+                                          db.ForeignKey('task_orchestration_executions.id'))
+    # 执行结果
+    result = db.Column(db.Text)
+    executor_id = db.Column(db.Integer)
+
+    task_orchestration_exe = db.relationship(
+        TaskOrchestrationExecution,
+        backref='atomic_task_exes',
+        foreign_keys=task_orchestration_exe_id,
+        primaryjoin='and_('
+                    'AtomicTaskExecution.task_orchestration_exe_id == '
+                    'TaskOrchestrationExecution.id,'
+                    'AtomicTaskExecution.deleted == False)')
+
+    atomic_task = db.relationship(AtomicTask, backref='atom_exes',
+                                  foreign_keys=atomic_task_id,
+                                  primaryjoin='and_('
+                                              'AtomicTaskExecution.atomic_task_id == '
+                                              'AtomicTask.id,'
+                                              'AtomicTaskExecution.deleted == False)')
+
+
+class AtomicTaskExecutionResult(db.Model, TimestampMixin, SoftDeleteMixin):
+    """Represents a single execution of the atomic task on a host."""
+    __tablename__ = 'atomic_task_execution_results'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    # 任务执行结果
+    content = db.Column(db.Text)
+
+    host_id = db.Column(db.Integer, db.ForeignKey('hosts.id'))
+    host_ip = db.Column(db.String(20))
+
+    # failed or success or unreachable
+    status = db.Column(db.String(255))
+
+    # host = db.relationship(Host, backref='atomic_task_execution_results')
+
+    task_execution_id = db.Column(db.Integer, db.ForeignKey('atomic_task_executions.id'))
+    task_execution = db.relationship(AtomicTaskExecution,
+                                     backref='atomic_task_execution_results')
